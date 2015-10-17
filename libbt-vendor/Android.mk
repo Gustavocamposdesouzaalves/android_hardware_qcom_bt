@@ -59,8 +59,7 @@ endif #WIFI_BT_STATUS_SYNC
 
 LOCAL_SHARED_LIBRARIES := \
         libcutils \
-        liblog \
-        libbtnv
+        liblog
 
 LOCAL_MODULE := libbt-vendor
 LOCAL_CLANG := false
