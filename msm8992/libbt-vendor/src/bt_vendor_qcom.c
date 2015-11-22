@@ -37,20 +37,14 @@
 #include <sys/socket.h>
 #include <cutils/sockets.h>
 #include <linux/un.h>
+#ifdef BT_NV_SUPPORT
 #include "bt_vendor_persist.h"
+#endif
 #include "hw_rome.h"
-#include "bt_vendor_lib.h"
+
 #define WAIT_TIMEOUT 200000
 #define BT_VND_OP_GET_LINESPEED 12
 
-#ifdef PANIC_ON_SOC_CRASH
-#define BT_VND_FILTER_START "wc_transport.start_root"
-#else
-#define BT_VND_FILTER_START "wc_transport.start_hci"
-#endif
-
-#define CMD_TIMEOUT  0x22
-void wait_for_patch_download();
 /******************************************************************************
 **  Externs
 ******************************************************************************/
@@ -61,7 +55,6 @@ extern int rome_soc_init(int fd, char *bdaddr);
 extern int check_embedded_mode(int fd);
 extern int rome_get_addon_feature_list(int fd);
 extern int rome_ver;
-extern int enable_controller_log(int fd, unsigned char req);
 /******************************************************************************
 **  Variables
 ******************************************************************************/
@@ -75,13 +68,6 @@ static int btSocType = BT_SOC_DEFAULT;
 static int rfkill_id = -1;
 static char *rfkill_state = NULL;
 bool enable_extldo = FALSE;
-
-int userial_clock_operation(int fd, int cmd);
-int ath3k_init(int fd, int speed, int init_speed, char *bdaddr, struct termios *ti);
-int rome_soc_init(int fd, char *bdaddr);
-int userial_vendor_get_baud(void);
-int readTrpState();
-void lpm_set_ar3k(uint8_t pio, uint8_t action, uint8_t polarity);
 
 static const tUSERIAL_CFG userial_init_cfg =
 {
@@ -112,6 +98,16 @@ bool is_soc_initialized(void);
 /******************************************************************************
 **  Local type definitions
 ******************************************************************************/
+
+/******************************************************************************
+**  TODO: Cleanup to use header file. Declare externally used functions.
+******************************************************************************/
+int readTrpState();
+int ath3k_init(int fd, int speed, int init_speed, char *bdaddr, struct termios *ti);
+int userial_clock_operation(int fd, int cmd);
+int rome_soc_init(int fd, char *bdaddr);
+void lpm_set_ar3k(uint8_t pio, uint8_t action, uint8_t polarity);
+int userial_vendor_get_baud(void);
 
 
 /******************************************************************************
@@ -202,7 +198,7 @@ static int get_bt_soc_type()
     ALOGI("bt-vendor : get_bt_soc_type");
 
     ret = property_get("qcom.bluetooth.soc", bt_soc_type, NULL);
-    if (ret >= 0) {
+    if (ret != 0) {
         ALOGI("qcom.bluetooth.soc set to %s\n", bt_soc_type);
         if (!strncasecmp(bt_soc_type, "rome", sizeof("rome"))) {
             return BT_SOC_ROME;
@@ -226,7 +222,6 @@ static int get_bt_soc_type()
 bool can_perform_action(char action) {
     bool can_perform = false;
     char ref_count[PROPERTY_VALUE_MAX];
-    char inProgress[PROPERTY_VALUE_MAX] = {'\0'};
     int value, ret;
 
     property_get("wc_transport.ref_count", ref_count, "0");
@@ -238,8 +233,7 @@ bool can_perform_action(char action) {
         ALOGV("%s: on : value is: %d", __func__, value);
         if(value == 1)
         {
-          property_get("wc_transport.patch_dnld_inprog", inProgress, "0");
-          if((is_soc_initialized() == true) || (strcmp(inProgress,"1") == 0))
+          if(is_soc_initialized() == true)
           {
             value++;
             ALOGV("%s: on : value is incremented to : %d", __func__, value);
@@ -276,14 +270,14 @@ void stop_hci_filter() {
        char value[PROPERTY_VALUE_MAX] = {'\0'};
        ALOGV("%s: Entry ", __func__);
 
-       property_get(BT_VND_FILTER_START, value, "false");
+       property_get("wc_transport.start_hci", value, "false");
 
        if (strcmp(value, "false") == 0) {
-           ALOGI("%s: hci_filter has been stopped already", __func__);
-//           return;
+           ALOGV("%s: hci_filter has been stopped already", __func__);
+           return;
        }
 
-       property_set(BT_VND_FILTER_START, "false");
+       property_set("wc_transport.start_hci", "false");
        property_set("wc_transport.hci_filter_status", "0");
        ALOGV("%s: Exit ", __func__);
 }
@@ -293,18 +287,17 @@ void start_hci_filter() {
        int i, init_success = 0;
        char value[PROPERTY_VALUE_MAX] = {'\0'};
 
-       property_get(BT_VND_FILTER_START, value, false);
+
+       property_get("wc_transport.start_hci", value, false);
 
        if (strcmp(value, "true") == 0) {
-           ALOGI("%s: hci_filter has been started already", __func__);
+           ALOGV("%s: hci_filter has been started already", __func__);
            return;
        }
 
        property_set("wc_transport.hci_filter_status", "0");
-       property_set(BT_VND_FILTER_START, "true");
 
-       ALOGV("%s: %s set to true ", __func__, BT_VND_FILTER_START );
-
+       property_set("wc_transport.start_hci", "true");
        //sched_yield();
        for(i=0; i<45; i++) {
           property_get("wc_transport.hci_filter_status", value, "0");
@@ -629,7 +622,6 @@ static int op(bt_vendor_opcode_t opcode, void *param)
     int nState = -1;
     bool is_ant_req = false;
     char wipower_status[PROPERTY_VALUE_MAX];
-    char emb_wp_mode[PROPERTY_VALUE_MAX];
     char bt_version[PROPERTY_VALUE_MAX];
     bool ignore_boot_prop = TRUE;
 #ifdef READ_BT_ADDR_FROM_PROP
@@ -638,7 +630,7 @@ static int op(bt_vendor_opcode_t opcode, void *param)
     uint8_t local_bd_addr_from_prop[6];
     char* tok;
 #endif
-    bool skip_init = true;
+
     ALOGV("bt-vendor : op for %d", opcode);
 
     switch(opcode)
@@ -681,19 +673,8 @@ static int op(bt_vendor_opcode_t opcode, void *param)
             {
                 // call hciattach to initalize the stack
                 if(bt_vendor_cbacks){
-                   if (btSocType ==  BT_SOC_ROME) {
-                       if (is_soc_initialized()) {
-                           ALOGI("Bluetooth FW and transport layer are initialized");
-                           bt_vendor_cbacks->fwcfg_cb(BT_VND_OP_RESULT_SUCCESS);
-                       } else {
-                           ALOGE("bt_vendor_cbacks is null or SoC not initialized");
-                           ALOGE("Error : hci, smd initialization Error");
-                           retval = -1;
-                       }
-                   } else {
-                       ALOGI("Bluetooth FW and transport layer are initialized");
-                       bt_vendor_cbacks->fwcfg_cb(BT_VND_OP_RESULT_SUCCESS);
-                   }
+                   ALOGI("Bluetooth Firmware and transport layer are initialized");
+                   bt_vendor_cbacks->fwcfg_cb(BT_VND_OP_RESULT_SUCCESS);
                 }
                 else{
                    ALOGE("bt_vendor_cbacks is null");
@@ -716,7 +697,6 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                 is_ant_req = true;
                 //fall through
 #endif
-
 #endif
         case BT_VND_OP_USERIAL_OPEN:
             {
@@ -765,12 +745,8 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                         break;
                     case BT_SOC_ROME:
                         {
-                            wait_for_patch_download();
-                            property_get("ro.bluetooth.emb_wp_mode", emb_wp_mode, false);
+                            property_get("persist.BT3_2.version", bt_version, false);
                             if (!is_soc_initialized()) {
-                                if (property_set("wc_transport.patch_dnld_inprog", "1") < 0) {
-                                    ALOGE("%s: Failed to set property", __FUNCTION__);
-                                }
                                 fd = userial_vendor_open((tUSERIAL_CFG *) &userial_init_cfg);
                                 if (fd < 0) {
                                     ALOGE("userial_vendor_open returns err");
@@ -779,7 +755,7 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                                     /* Clock on */
                                     userial_clock_operation(fd, USERIAL_OP_CLK_ON);
                                     ALOGD("userial clock on");
-                                    if(strcmp(emb_wp_mode, "true") == 0) {
+                                    if(strcmp(bt_version, "true") == 0) {
                                         property_get("ro.bluetooth.wipower", wipower_status, false);
                                         if(strcmp(wipower_status, "true") == 0) {
                                             check_embedded_mode(fd);
@@ -831,7 +807,7 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                                        /* Since the BD address is configured in boot time We should not be here */
                                        ALOGI("Failed to read BD address. Use the one from bluedroid stack/ftm");
                                     }
-#endif
+#endif //BT_NV_SUPPORT
                                     if(rome_soc_init(fd,vnd_local_bd_addr)<0) {
                                         retval = -1;
                                         userial_clock_operation(fd, USERIAL_OP_CLK_OFF);
@@ -839,14 +815,10 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                                         ALOGV("rome_soc_init is completed");
                                         property_set("wc_transport.soc_initialized", "1");
                                         userial_clock_operation(fd, USERIAL_OP_CLK_OFF);
-                                        skip_init = false;
                                         /*Close the UART port*/
                                         close(fd);
                                     }
                                 }
-                            }
-                            if (property_set("wc_transport.patch_dnld_inprog", "0") < 0) {
-                                ALOGE("%s: Failed to set property", __FUNCTION__);
                             }
 
                             property_set("wc_transport.clean_up","0");
@@ -867,17 +839,12 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                                  if (fd != -1) {
                                      ALOGV("%s: received the socket fd: %d is_ant_req: %d\n",
                                                                  __func__, fd, is_ant_req);
-                                     if((strcmp(emb_wp_mode, "true") == 0) && !is_ant_req) {
+                                     if((strcmp(bt_version, "true") == 0) && !is_ant_req) {
                                          if (rome_ver >= ROME_VER_3_0) {
                                              /*  get rome supported feature request */
                                              ALOGE("%s: %x08 %0x", __FUNCTION__,rome_ver, ROME_VER_3_0);
                                              rome_get_addon_feature_list(fd);
                                          }
-                                     }
-                                     if (!skip_init) {
-                                         /*Skip if already sent*/
-                                         enable_controller_log(fd, is_ant_req);
-                                         skip_init = true;
                                      }
                                      for (idx=0; idx < CH_MAX; idx++)
                                           (*fd_array)[idx] = fd;
@@ -955,9 +922,8 @@ static int op(bt_vendor_opcode_t opcode, void *param)
                     bt_vendor_cbacks->lpm_cb(BT_VND_OP_RESULT_SUCCESS);
             }
             else {
-                // respond with failure as it's already handled by other mechanism
                 if (bt_vendor_cbacks)
-                    bt_vendor_cbacks->lpm_cb(BT_VND_OP_RESULT_FAIL);
+                    bt_vendor_cbacks->lpm_cb(BT_VND_OP_RESULT_SUCCESS); //dummy
             }
             break;
 
@@ -1058,14 +1024,10 @@ static int op(bt_vendor_opcode_t opcode, void *param)
     return retval;
 }
 
-static void ssr_cleanup(int reason) {
+static void ssr_cleanup(void) {
     int pwr_state=BT_VND_PWR_OFF;
-    int ret;
-    unsigned char trig_ssr = 0xEE;
+
     ALOGI("ssr_cleanup");
-    if (property_set("wc_transport.patch_dnld_inprog", "0") < 0) {
-        ALOGE("%s: Failed to set property", __FUNCTION__);
-    }
 
     if ((btSocType = get_bt_soc_type()) < 0) {
         ALOGE("%s: Failed to detect BT SOC Type", __FUNCTION__);
@@ -1075,14 +1037,6 @@ static void ssr_cleanup(int reason) {
     if (btSocType == BT_SOC_ROME) {
 #ifdef BT_SOC_TYPE_ROME
 #ifdef ENABLE_ANT
-        //Indicate to filter by sending
-        //special byte
-        if (reason == CMD_TIMEOUT) {
-            trig_ssr = 0xEE;
-            ret = write (vnd_userial.fd, &trig_ssr, 1);
-            ALOGI("Trig_ssr is being sent to BT socket, retval(%d) :errno:  %s", ret, strerror(errno));
-            return;
-        }
         /*Close both ANT channel*/
         op(BT_VND_OP_ANT_USERIAL_CLOSE, NULL);
 #endif
@@ -1091,15 +1045,15 @@ static void ssr_cleanup(int reason) {
         op(BT_VND_OP_USERIAL_CLOSE, NULL);
         /*CTRL OFF twice to make sure hw
          * turns off*/
-#ifdef ENABLE_ANT
         op(BT_VND_OP_POWER_CTRL, &pwr_state);
-#endif
 
     }
+
 #ifdef BT_SOC_TYPE_ROME
     /*Generally switching of chip should be enough*/
     op(BT_VND_OP_POWER_CTRL, &pwr_state);
 #endif
+    bt_vendor_cbacks = NULL;
 }
 
 
@@ -1112,24 +1066,6 @@ static void cleanup( void )
 #ifdef WIFI_BT_STATUS_SYNC
     isInit = 0;
 #endif /* WIFI_BT_STATUS_SYNC */
-}
-
-/* Check for one of the cients ANT/BT patch download is already in
-** progress if yes wait till complete
-*/
-void wait_for_patch_download() {
-    ALOGV("%s:", __FUNCTION__);
-    char inProgress[PROPERTY_VALUE_MAX] = {'\0'};
-    while (1) {
-        property_get("wc_transport.patch_dnld_inprog", inProgress, "0");
-        if(strcmp(inProgress,"1") == 0) {
-           usleep(50000);
-        }
-        else {
-           ALOGI("%s: patch download completed", __FUNCTION__);
-           break;
-        }
-    }
 }
 
 // Entry point of DLib
